@@ -20,11 +20,6 @@ Built with Kotlin and Jetpack Compose.
 - **Quick Settings tile** for the current network type
 - Guided first-run onboarding for the permissions the app needs
 
-## Screenshots
-
-<!-- Add screenshots here, e.g.:
-<img src="screenshots/home.png" width="240"> <img src="screenshots/stats.png" width="240"> <img src="screenshots/settings.png" width="240">
--->
 
 ## Download
 
