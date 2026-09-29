@@ -18,6 +18,8 @@ import android.graphics.Paint
 import android.graphics.Typeface
 import android.os.Build
 import android.os.IBinder
+import androidx.core.content.edit
+import androidx.core.graphics.createBitmap
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -47,7 +49,6 @@ import org.json.JSONObject
 
 class NetLockService : Service() {
 
-    // Same objects jo MainActivity use karti hai
     private val networkType = NetLockState.networkType
     private val lastSwitchTime = NetLockState.lastSwitchTime
     private val vibrateEnabled = NetLockState.vibrateEnabled
@@ -75,9 +76,6 @@ class NetLockService : Service() {
     private var baselineNextReading = true
     private var monitoredSubId: Int = SubscriptionManager.INVALID_SUBSCRIPTION_ID
 
-// --- 60-sec debounce, SIRF Stats-tab counter (Total/Today/7-Days) ke liye.
-// eventLog (Recent list + Distribution) is se bilkul unaffected rahega —
-// wo har raw change turant, pehle jaisa hi, log karta rahega. ---
     private var confirmedCountType: String? = null
     private var pendingSwitchType: String? = null
     private var pendingSwitchFrom: String? = null
@@ -85,18 +83,14 @@ class NetLockService : Service() {
     private val switchDebounceHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var switchDebounceRunnable: Runnable? = null
 
-    // Flight-mode OFF hone ke baad status notification ko turant NAHI,
-    // thodi der ruk kar refresh karne ke liye (see refreshAirplaneModeStatus).
     private val flightModeResyncHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var flightModeResyncRunnable: Runnable? = null
 
-    // Heartbeat: har 5 min "service zinda hai" timestamp save hota hai, taaki restart par
-    // pata chale ki kitni der service band rahi.
     private var resumeAfterGap = false
     private val heartbeatHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val heartbeatRunnable = object : Runnable {
         override fun run() {
-            prefs.edit().putLong(KEY_LAST_ALIVE, System.currentTimeMillis()).apply()
+            prefs.edit { putLong(KEY_LAST_ALIVE, System.currentTimeMillis()) }
             heartbeatHandler.postDelayed(this, HEARTBEAT_MILLIS)
         }
     }
@@ -104,8 +98,6 @@ class NetLockService : Service() {
     private val subscriptionsChangedListener = object : SubscriptionManager.OnSubscriptionsChangedListener() {
         override fun onSubscriptionsChanged() {
             refreshSimSlotAvailability()
-            // auto mode: pehle jaisa hi hamesha restart. Pinned SIM: sirf tab jab
-            // us slot ki subId badli ho (SIM swap / nikali / dobara daali).
             if (selectedSimSlot.value == "auto" ||
                 resolveTargetSubscriptionId() != monitoredSubId
             ) {
@@ -138,7 +130,7 @@ class NetLockService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        prefs = getSharedPreferences(Prefs.FILE, Context.MODE_PRIVATE)
+        prefs = getSharedPreferences(Prefs.FILE, MODE_PRIVATE)
         vibrateEnabled.value = prefs.getBoolean(KEY_VIBRATE_ENABLED, true)
         soundEnabled.value = prefs.getBoolean(KEY_SOUND_ENABLED, true)
         selectedSimSlot.value = prefs.getString(KEY_SIM_SLOT, "auto") ?: "auto"
@@ -146,8 +138,6 @@ class NetLockService : Service() {
         alertOn3G2G.value = prefs.getBoolean(KEY_ALERT_3G_2G, false)
         bypassDnd.value = prefs.getBoolean(KEY_BYPASS_DND, true)
         eventLog.value = loadEventLog()
-        // Service band/kill rehne ka gap (heartbeat se) pakdo, taaki Stats me wo time
-        // last network ke naam na chadhe.
         val lastAlive = prefs.getLong(KEY_LAST_ALIVE, 0L)
         if (lastAlive != 0L && System.currentTimeMillis() - lastAlive > GAP_THRESHOLD_MILLIS) {
             logNetworkEvent(GAP_MARKER, timestamp = lastAlive)
@@ -180,8 +170,6 @@ class NetLockService : Service() {
             IntentFilter(Intent.ACTION_AIRPLANE_MODE_CHANGED),
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
-        // Start par current flight-mode state pehle hi state me daal do, taaki
-        // "wasOn != nowOn" jhoothi tarah se true hokar duplicate event na banaye.
         isAirplaneModeOn.value = Settings.Global.getInt(
             contentResolver,
             Settings.Global.AIRPLANE_MODE_ON,
@@ -206,7 +194,6 @@ class NetLockService : Service() {
         }
     }
 
-    // Activity se call hone wale chhote wrappers
     fun restartMonitoringForSimChange() {
         cancelPendingSwitch()
         confirmedCountType = null
@@ -222,21 +209,18 @@ class NetLockService : Service() {
     fun testVibrate() = vibrateOnce()
 
     private fun startNetworkMonitoring() {
-        // Stop any previous monitoring before (re)binding to the target SIM
         stopNetworkMonitoring()
 
         val targetSubId = resolveTargetSubscriptionId()
         monitoredSubId = targetSubId
 
-        // Pinned SIM (SIM 1 / SIM 2) available nahi hai to default SIM par silently
-        // fallback NAHI karna — warna galat SIM ke alerts aayenge.
         if (targetSubId == SubscriptionManager.INVALID_SUBSCRIPTION_ID &&
             selectedSimSlot.value != "auto" &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE)
                 == PackageManager.PERMISSION_GRANTED
         ) {
             monitoredTelephonyManager = null
-            trackingLabel.value = buildTrackingLabel(targetSubId)   // "SIM unavailable"
+            trackingLabel.value = buildTrackingLabel(targetSubId)
             carrierOperatorName.value = "—"
             carrierMccMnc.value = "—"
             rsrpValue.value = "—"
@@ -255,77 +239,55 @@ class NetLockService : Service() {
         trackingLabel.value = buildTrackingLabel(targetSubId)
         updateCarrierInfo(target)
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val callback = object : TelephonyCallback(),
-                TelephonyCallback.DisplayInfoListener,
-                TelephonyCallback.ServiceStateListener,
-                TelephonyCallback.SignalStrengthsListener,
-                TelephonyCallback.ActiveDataSubscriptionIdListener {
-                override fun onDisplayInfoChanged(displayInfo: TelephonyDisplayInfo) {
-                    lastDisplayInfo = displayInfo
-                    updateNetworkType(mapDetailedNetworkType(displayInfo))
-                }
-                override fun onServiceStateChanged(serviceState: ServiceState) {
-                    // OUT_OF_SERVICE / POWER_OFF is a debounced, reliable signal
-                    // from the OS that there's genuinely no network — unlike a
-                    // raw "Unknown" radio-type blip during a handover.
-                    if (serviceState.state == ServiceState.STATE_OUT_OF_SERVICE ||
-                        serviceState.state == ServiceState.STATE_POWER_OFF ||
-                        serviceState.state == ServiceState.STATE_EMERGENCY_ONLY
-                    ) {
-                        updateNetworkType("No Service")
-                    } else if (serviceState.state == ServiceState.STATE_IN_SERVICE) {
-                        resyncAfterServiceRestored(target)
-                    }
-                }
-                override fun onSignalStrengthsChanged(signalStrength: SignalStrength) {
-                    updateSignalQuality(signalStrength)
-                }
-                override fun onActiveDataSubscriptionIdChanged(subId: Int) {
-                    // Registration par ye turant ek baar fire hota hai, isliye sirf tab restart
-                    // jab default-data sub ACTUALLY badla ho — warna restart loop ban jayega.
-                    if (selectedSimSlot.value == "auto" &&
-                        resolveTargetSubscriptionId() != monitoredSubId
-                    ) {
-                        mainExecutor.execute { restartMonitoringForSimChange() }
-                    }
+        val callback = object : TelephonyCallback(),
+            TelephonyCallback.DisplayInfoListener,
+            TelephonyCallback.ServiceStateListener,
+            TelephonyCallback.SignalStrengthsListener,
+            TelephonyCallback.ActiveDataSubscriptionIdListener {
+            override fun onDisplayInfoChanged(displayInfo: TelephonyDisplayInfo) {
+                lastDisplayInfo = displayInfo
+                updateNetworkType(mapDetailedNetworkType(displayInfo))
+            }
+            override fun onServiceStateChanged(serviceState: ServiceState) {
+                if (serviceState.state == ServiceState.STATE_OUT_OF_SERVICE ||
+                    serviceState.state == ServiceState.STATE_POWER_OFF ||
+                    serviceState.state == ServiceState.STATE_EMERGENCY_ONLY
+                ) {
+                    updateNetworkType("No Service")
+                } else if (serviceState.state == ServiceState.STATE_IN_SERVICE) {
+                    resyncAfterServiceRestored(target)
                 }
             }
-            telephonyCallback = callback
-            try {
-                target.registerTelephonyCallback(mainExecutor, callback)
-            } catch (e: SecurityException) {
-                networkType.value = "Permission denied"
+            override fun onSignalStrengthsChanged(signalStrength: SignalStrength) {
+                updateSignalQuality(signalStrength)
             }
-        } else {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE)
-                != PackageManager.PERMISSION_GRANTED
-            ) {
-                networkType.value = "Permission denied"
-                return
+            override fun onActiveDataSubscriptionIdChanged(subId: Int) {
+                if (selectedSimSlot.value == "auto" &&
+                    resolveTargetSubscriptionId() != monitoredSubId
+                ) {
+                    mainExecutor.execute { restartMonitoringForSimChange() }
+                }
             }
-            try {
-                @Suppress("DEPRECATION")
-                updateNetworkType(mapLegacyType(target.dataNetworkType))
-            } catch (e: SecurityException) {
-                networkType.value = "Permission denied"
-            }
+        }
+        telephonyCallback = callback
+        try {
+            target.registerTelephonyCallback(mainExecutor, callback)
+        } catch (_: SecurityException) {
+            networkType.value = "Permission denied"
         }
     }
 
     private fun stopNetworkMonitoring() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            telephonyCallback?.let { monitoredTelephonyManager?.unregisterTelephonyCallback(it) }
-        }
+        telephonyCallback?.let { monitoredTelephonyManager?.unregisterTelephonyCallback(it) }
         telephonyCallback = null
         lastDisplayInfo = null
     }
 
     private fun updateCarrierInfo(manager: TelephonyManager) {
-        val opName = try { manager.networkOperatorName } catch (e: Exception) { null }
+        val opName = try { manager.networkOperatorName } catch (_: Exception) { null }
         carrierOperatorName.value = if (!opName.isNullOrBlank()) opName else "—"
 
-        val op = try { manager.networkOperator } catch (e: Exception) { null }
+        val op = try { manager.networkOperator } catch (_: Exception) { null }
         carrierMccMnc.value = if (!op.isNullOrBlank() && op.length >= 5) {
             "${op.substring(0, 3)} · ${op.substring(3)}"
         } else {
@@ -333,14 +295,9 @@ class NetLockService : Service() {
         }
     }
 
-    // Flight mode OFF ke baad radio pehle OUT_OF_SERVICE deta hai, network milne par
-    // sirf ServiceState IN_SERVICE aata hai. DisplayInfo dobara tabhi aata hai jab uski
-    // value badle, isliye yahan last known DisplayInfo se type wapas sync karte hain,
-    // aur carrier info + tracking label bhi refresh karte hain.
     private fun resyncAfterServiceRestored(manager: TelephonyManager) {
         updateCarrierInfo(manager)
         trackingLabel.value = buildTrackingLabel(resolveTargetSubscriptionId())
-        // Sirf tab sync karo jab abhi "No Service"/unrecognized dikh raha ho
         if (networkTier(networkType.value) > 0) return
         val restored = lastDisplayInfo?.let { mapDetailedNetworkType(it) } ?: return
         if (networkTier(restored) != -1) updateNetworkType(restored)
@@ -385,7 +342,7 @@ class NetLockService : Service() {
                 ?.firstOrNull { it.simSlotIndex == slotIndex }
                 ?.subscriptionId
                 ?: SubscriptionManager.INVALID_SUBSCRIPTION_ID
-        } catch (e: SecurityException) {
+        } catch (_: SecurityException) {
             SubscriptionManager.INVALID_SUBSCRIPTION_ID
         }
     }
@@ -396,13 +353,10 @@ class NetLockService : Service() {
     }
 
     private fun isSimPresentInSlot(slotIndex: Int): Boolean {
-        // getSimState() reads the radio's per-slot state directly — unlike
-        // activeSubscriptionInfoList, it doesn't lag behind a physical SIM
-        // removal/insertion, and needs no runtime permission.
         return try {
             val state = telephonyManager.getSimState(slotIndex)
             state != TelephonyManager.SIM_STATE_ABSENT && state != TelephonyManager.SIM_STATE_UNKNOWN
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             false
         }
     }
@@ -417,18 +371,7 @@ class NetLockService : Service() {
         if (nowOn != wasOn) {
             logNetworkEvent(if (nowOn) "Flight Mode" else "Flight Mode Off")
             if (!nowOn) {
-                // Flight mode abhi OFF hua — telephony callback ko force
-                // re-register karo taaki current network type turant
-                // sync ho jaye, app restart ka wait na karna pade.
                 startNetworkMonitoring()
-                // NOTE: yahan turant refreshStatusNotificationIcon() call
-                // NAHI kar rahe — us waqt networkType.value abhi bhi purana
-                // ("No Service"/SOS) hota hai, kyunki fresh telephony reading
-                // thodi der baad (async) aati hai aur khud apna notify() call
-                // karti hai (updateNetworkType ke andar se). Do turant-turant
-                // notify() calls (ek stale, ek correct) kai OEMs par status-bar
-                // icon ko stuck kar dete hain. Isliye ek delayed safety-refresh
-                // schedule karo — tab tak fresh reading aa chuki hoti hai.
                 scheduleFlightModeStatusResync()
                 return
             }
@@ -458,7 +401,7 @@ class NetLockService : Service() {
                         getSystemService(SubscriptionManager::class.java)
                             ?.activeSubscriptionInfoList
                             ?.firstOrNull { it.subscriptionId == subId }
-                    } catch (e: SecurityException) {
+                    } catch (_: SecurityException) {
                         null
                     }
                     when (info?.simSlotIndex) {
@@ -473,7 +416,7 @@ class NetLockService : Service() {
         }
         val operatorName = try {
             telephonyManager.createForSubscriptionId(subId).networkOperatorName
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             ""
         }
         return if (operatorName.isNotBlank()) "$slotLabel • $operatorName" else slotLabel
@@ -481,15 +424,11 @@ class NetLockService : Service() {
 
     private fun mapDetailedNetworkType(info: TelephonyDisplayInfo): String {
         return when (info.overrideNetworkType) {
-            // NSA (Non-Standalone): 5G radio riding on a 4G core network
             TelephonyDisplayInfo.OVERRIDE_NETWORK_TYPE_NR_ADVANCED -> "5G NSA+"
             TelephonyDisplayInfo.OVERRIDE_NETWORK_TYPE_NR_NSA -> "5G NSA"
-            // Carrier-aggregated LTE — shown as "4G+"
             TelephonyDisplayInfo.OVERRIDE_NETWORK_TYPE_LTE_CA,
             TelephonyDisplayInfo.OVERRIDE_NETWORK_TYPE_LTE_ADVANCED_PRO -> "4G+"
             else -> {
-                // No NSA override present — if the raw radio type is NR,
-                // the device is on a true Standalone 5G core.
                 if (info.networkType == TelephonyManager.NETWORK_TYPE_NR) {
                     "5G SA"
                 } else {
@@ -499,6 +438,7 @@ class NetLockService : Service() {
         }
     }
 
+    @Suppress("DEPRECATION")
     private fun mapLegacyType(type: Int): String {
         return when (type) {
             TelephonyManager.NETWORK_TYPE_NR -> "5G"
@@ -521,16 +461,6 @@ class NetLockService : Service() {
     }
 
     private fun updateNetworkType(newType: String) {
-        // 'previousNetworkType' kabhi-kabhi race/listener re-trigger se
-        // null ho jaata hai (see eventLog guard neeche) — us waqt agar
-        // alert-decision SIRF isi variable pe depend kare to real switch
-        // pe bhi vibration/notification skip ho jaata hai. Isliye fallback
-        // ke taur pe persisted eventLog ka last entry bhi check karo.
-        // "Flight Mode"/"Flight Mode Off" jaise pseudo-events bhi isi
-        // eventLog me store hote hain (real network type nahi hote) —
-        // fallback ke liye sirf WAHI last entry lo jo ek valid, tier-
-        // wala real network reading ho, warna networkTier() -1 dega
-        // aur alert block hamesha ke liye skip ho jaayega.
         val lastLoggedType = eventLog.value.lastOrNull { networkTier(it.type) != -1 }?.type
         val previous = if (baselineNextReading) null else (previousNetworkType ?: lastLoggedType)
         val previousTier = previous?.let { networkTier(it) } ?: -1
@@ -541,12 +471,11 @@ class NetLockService : Service() {
             val touches3GOr2G = previousTier in 1..2 || newTier in 1..2
 
             val shouldAlert = when {
-                touchesNoService -> true            // signal fully lost/restored — always alert
-                touches3GOr2G -> alertOn3G2G.value    // 3G/2G involved — gated by the toggle
-                else -> true                          // 4G <-> 5G — always alert (existing behavior)
+                touchesNoService -> true
+                touches3GOr2G -> alertOn3G2G.value
+                else -> true
             }
 
-            // LAST SWITCH alert toggle se independent: jab bhi tier badle (5G/4G/3G/2G/No Service)
             if (newTier != previousTier) updateLastSwitchTime()
 
             if (shouldAlert) {
@@ -567,34 +496,19 @@ class NetLockService : Service() {
                 }
             }
         }
-        // Only remember recognized, non-transient states as the "last known"
-        // state — this now covers 3G/2G/No Service alongside 4G/5G, but still
-        // excludes raw "Unknown" radio blips (networkTier returns -1 for those).
-        // Ye block PEHLE jaisa hi hai — har real change turant eventLog me
-        // (Recent list + Distribution) log hota hai, koi debounce nahi.
         if (newTier != -1) {
-            // Duplicate/false entries (app restart, subscription-listener
-            // re-trigger, callback re-registration race) fix: in-memory
-            // 'previous' ke bajaye eventLog ke ACTUAL last-saved type se
-            // compare karo — wo restarts ke across bhi sahi rehta hai.
             val lastLogged = lastLoggedType
             if (previous == null) {
-                // Pehli baar detect hua. Agar last-persisted type wahi hai
-                // jo abhi detect hua, to ye sirf app restart hai (real change
-                // nahi) — Recent me kuch mat dikhao, bas baseline set karo.
                 if (lastLogged == null || lastLogged != newType || resumeAfterGap) {
                     logNetworkEvent(newType, countAsSwitch = false)
                 }
             } else if (previous != newType && lastLogged != newType) {
-                // 'lastLogged != newType' extra guard hai taaki koi race/
-                // duplicate delivery same type ko dobara log na kare.
                 logNetworkEvent(newType)
             }
             previousNetworkType = newType
             baselineNextReading = false
             resumeAfterGap = false
 
-            // --- Alag, independent debounce SIRF Stats counter ke liye ---
             if (confirmedCountType == null) {
                 confirmedCountType = newType
             } else if (confirmedCountType != newType) {
@@ -614,7 +528,7 @@ class NetLockService : Service() {
             type == "3G" -> 2
             type == "2G" -> 1
             type == "No Service" -> 0
-            else -> -1 // transient/unrecognized (e.g. "Unknown") — never compared
+            else -> -1
         }
     }
 
@@ -622,10 +536,11 @@ class NetLockService : Service() {
         val formatter = SimpleDateFormat("dd MMM, HH:mm", Locale.getDefault())
         val formatted = formatter.format(Date())
         lastSwitchTime.value = formatted
-        prefs.edit().putString(KEY_LAST_SWITCH, formatted).apply()
+        prefs.edit { putString(KEY_LAST_SWITCH, formatted) }
     }
 
     
+    @Suppress("UNUSED_PARAMETER")
     private fun logNetworkEvent(type: String, countAsSwitch: Boolean = true, timestamp: Long = System.currentTimeMillis()) {
         val cutoff = System.currentTimeMillis() - SEVEN_DAYS_MILLIS
         val updated = (eventLog.value + NetworkEvent(type, timestamp))
@@ -633,8 +548,6 @@ class NetLockService : Service() {
             .takeLast(MAX_EVENTS)
         eventLog.value = updated
         saveEventLog(updated)
-        // NOTE: ab yahan totalSwitchCount increment NAHI hota — wo sirf
-        // confirmDebouncedSwitch() se, 60-sec debounce confirm hone par hota hai.
     }
     
     private fun scheduleDebouncedSwitch(from: String, to: String) {
@@ -651,8 +564,6 @@ class NetLockService : Service() {
     }
 
     private fun cancelPendingSwitch() {
-        // confirmedCountType par wapas aa gaya 60 sec se pehle — flap tha,
-        // isko Stats counter me count nahi karna.
         switchDebounceRunnable?.let { switchDebounceHandler.removeCallbacks(it) }
         switchDebounceRunnable = null
         pendingSwitchType = null
@@ -660,14 +571,12 @@ class NetLockService : Service() {
     }
 
     private fun confirmDebouncedSwitch(from: String, to: String, transitionTimestamp: Long) {
-        // 60 sec guzar gaye bina revert hue — ab ye real switch maana jaayega
-        // (SIRF Stats counter ke liye — eventLog isse independent hai).
         if (pendingSwitchType != to || confirmedCountType != from) {
             return
         }
         confirmedCountType = to
         totalSwitchCount.value += 1
-        prefs.edit().putLong(KEY_TOTAL_SWITCHES, totalSwitchCount.value).apply()
+        prefs.edit { putLong(KEY_TOTAL_SWITCHES, totalSwitchCount.value) }
         val updated = (switchCountLog.value + transitionTimestamp)
             .filter { it >= System.currentTimeMillis() - SEVEN_DAYS_MILLIS }
         switchCountLog.value = updated
@@ -679,7 +588,7 @@ class NetLockService : Service() {
 
     private fun saveSwitchCountLog(timestamps: List<Long>) {
         val serialized = timestamps.joinToString("|")
-        prefs.edit().putString(KEY_SWITCH_COUNT_LOG, serialized).apply()
+        prefs.edit { putString(KEY_SWITCH_COUNT_LOG, serialized) }
     }
 
     private fun loadSwitchCountLog(): List<Long> {
@@ -691,7 +600,7 @@ class NetLockService : Service() {
     private fun saveEventLog(events: List<NetworkEvent>) {
         val arr = JSONArray()
         events.forEach { arr.put(JSONObject().put("t", it.timestampMillis).put("y", it.type)) }
-        prefs.edit().putString(KEY_EVENT_LOG, arr.toString()).apply()
+        prefs.edit { putString(KEY_EVENT_LOG, arr.toString()) }
     }
 
     private fun loadEventLog(): List<NetworkEvent> {
@@ -705,11 +614,10 @@ class NetLockService : Service() {
                     val type = o.optString("y")
                     if (type.isEmpty()) null else NetworkEvent(type, o.optLong("t"))
                 }
-            } catch (e: JSONException) {
+            } catch (_: JSONException) {
                 emptyList()
             }
         } else {
-            // purana pipe-format: ek baar padh lo, agla save JSON mein hoga
             raw.split("|").mapNotNull { entry ->
                 val parts = entry.split(":", limit = 2)
                 val ts = parts.getOrNull(0)?.toLongOrNull()
@@ -719,17 +627,10 @@ class NetLockService : Service() {
         return parsed.filter { it.timestampMillis >= cutoff }.takeLast(MAX_EVENTS)
     }
     private fun getVibrator(): Vibrator {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val manager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
-            manager.defaultVibrator
-        } else {
-            @Suppress("DEPRECATION")
-            getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-        }
+        val manager = getSystemService(VIBRATOR_MANAGER_SERVICE) as VibratorManager
+        return manager.defaultVibrator
     }
 
-    // Bina attributes ke vibration USAGE_UNKNOWN hoti hai, jise OS media-vibration setting /
-    // battery saver / OEM filter se ignore kar deta hai. USAGE_ALARM in sab se pass hota hai.
     private fun playVibration(vibrator: Vibrator, effect: VibrationEffect) {
         val bypass = bypassDnd.value
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -754,63 +655,50 @@ class NetLockService : Service() {
         val vibrator = getVibrator()
         Log.d("NetLock", "vibrateOnce() called, enabled=${vibrateEnabled.value}, hasVibrator=${vibrator.hasVibrator()}")
         if (!vibrateEnabled.value) return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            playVibration(vibrator, VibrationEffect.createOneShot(200, VibrationEffect.DEFAULT_AMPLITUDE))
-        } else {
-            @Suppress("DEPRECATION")
-            vibrator.vibrate(200)
-        }
+        playVibration(vibrator, VibrationEffect.createOneShot(200, VibrationEffect.DEFAULT_AMPLITUDE))
     }
 
     private fun vibrateTwice() {
         val vibrator = getVibrator()
         Log.d("NetLock", "vibrateTwice() called, enabled=${vibrateEnabled.value}, hasVibrator=${vibrator.hasVibrator()}")
         if (!vibrateEnabled.value) return
-        // pattern: [wait, vibrate, pause, vibrate]
         val pattern = longArrayOf(0, 200, 400, 200)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            playVibration(vibrator, VibrationEffect.createWaveform(pattern, -1))
-        } else {
-            @Suppress("DEPRECATION")
-            vibrator.vibrate(pattern, -1)
-        }
+        playVibration(vibrator, VibrationEffect.createWaveform(pattern, -1))
     }
 
     private fun createNotificationChannels() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val manager = getSystemService(NotificationManager::class.java)
+        val manager = getSystemService(NotificationManager::class.java)
 
-            val upgradeChannel = NotificationChannel(
-                CHANNEL_ID_UPGRADE,
-                "Network Upgrade Alerts",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Alerts when network upgrades from 4G to 5G"
-                enableVibration(false)
-            }
-
-            val downgradeChannel = NotificationChannel(
-                CHANNEL_ID_DOWNGRADE,
-                "Network Downgrade Alerts",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Alerts when network downgrades from 5G to 4G"
-                enableVibration(false)
-            }
-
-            val statusChannel = NotificationChannel(
-                CHANNEL_ID_STATUS,
-                "Network Status",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Ongoing status bar icon showing the current network type"
-                setShowBadge(false)
-            }
-
-            manager.createNotificationChannel(upgradeChannel)
-            manager.createNotificationChannel(downgradeChannel)
-            manager.createNotificationChannel(statusChannel)
+        val upgradeChannel = NotificationChannel(
+            CHANNEL_ID_UPGRADE,
+            "Network Upgrade Alerts",
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = "Alerts when network upgrades from 4G to 5G"
+            enableVibration(false)
         }
+
+        val downgradeChannel = NotificationChannel(
+            CHANNEL_ID_DOWNGRADE,
+            "Network Downgrade Alerts",
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = "Alerts when network downgrades from 5G to 4G"
+            enableVibration(false)
+        }
+
+        val statusChannel = NotificationChannel(
+            CHANNEL_ID_STATUS,
+            "Network Status",
+            NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = "Ongoing status bar icon showing the current network type"
+            setShowBadge(false)
+        }
+
+        manager.createNotificationChannel(upgradeChannel)
+        manager.createNotificationChannel(downgradeChannel)
+        manager.createNotificationChannel(statusChannel)
     }
 
     private fun openAppIntent(): PendingIntent {
@@ -894,9 +782,6 @@ class NetLockService : Service() {
             .build()
         try {
             if (forceRepost) {
-                // Kuch OEMs (MIUI etc.) silent ongoing notification ka
-                // in-place update() drop kar dete hain — cancel + fresh
-                // notify() usually icon redraw force kar deta hai.
                 NotificationManagerCompat.from(this).cancel(NOTIFICATION_ID_STATUS)
             }
             NotificationManagerCompat.from(this).notify(NOTIFICATION_ID_STATUS, notification)
@@ -907,7 +792,7 @@ class NetLockService : Service() {
 
     private fun generateStatusIcon(text: String): IconCompat {
         val size = 96
-        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val bitmap = createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = android.graphics.Color.WHITE
@@ -929,12 +814,10 @@ class NetLockService : Service() {
         heartbeatHandler.removeCallbacks(heartbeatRunnable)
         switchDebounceHandler.removeCallbacksAndMessages(null)
         flightModeResyncHandler.removeCallbacksAndMessages(null)
-        prefs.edit().putLong(KEY_LAST_ALIVE, System.currentTimeMillis()).apply()
+        prefs.edit { putLong(KEY_LAST_ALIVE, System.currentTimeMillis()) }
         stopNetworkMonitoring()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            getSystemService(SubscriptionManager::class.java)
-                ?.removeOnSubscriptionsChangedListener(subscriptionsChangedListener)
-        }
+        getSystemService(SubscriptionManager::class.java)
+            ?.removeOnSubscriptionsChangedListener(subscriptionsChangedListener)
         unregisterReceiver(airplaneModeReceiver)
     }
 

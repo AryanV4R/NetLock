@@ -17,7 +17,7 @@ import android.telephony.TelephonyManager
 import android.Manifest
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
-import androidx.core.graphics.drawable.IconCompat
+import androidx.core.graphics.createBitmap
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
@@ -55,7 +55,7 @@ class NetworkTypeTileService : TileService() {
                 ?.firstOrNull { it.simSlotIndex == 0 }
                 ?.subscriptionId
                 ?: SubscriptionManager.INVALID_SUBSCRIPTION_ID
-        } catch (e: SecurityException) {
+        } catch (_: SecurityException) {
             SubscriptionManager.INVALID_SUBSCRIPTION_ID
         }
     }
@@ -69,43 +69,28 @@ class NetworkTypeTileService : TileService() {
         val manager = getSystemService(TELEPHONY_SERVICE) as TelephonyManager
         telephonyManager = manager
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val callback = object : TelephonyCallback(), TelephonyCallback.DisplayInfoListener {
-                override fun onDisplayInfoChanged(displayInfo: TelephonyDisplayInfo) {
-                    updateTileLabel(shortNetworkLabel(displayInfo))
-                }
+        val callback = object : TelephonyCallback(), TelephonyCallback.DisplayInfoListener {
+            override fun onDisplayInfoChanged(displayInfo: TelephonyDisplayInfo) {
+                updateTileLabel(shortNetworkLabel(displayInfo))
             }
-            telephonyCallback = callback
-            try {
-                manager.registerTelephonyCallback(mainExecutor, callback)
-            } catch (e: SecurityException) {
-                Log.d("NetLock", "Tile: unable to register telephony callback: ${e.message}")
-            }
-        } else {
-            try {
-                @Suppress("DEPRECATION")
-                updateTileLabel(legacyShortLabel(manager.dataNetworkType))
-            } catch (e: SecurityException) {
-                Log.d("NetLock", "Tile: unable to read network type: ${e.message}")
-            }
+        }
+        telephonyCallback = callback
+        try {
+            manager.registerTelephonyCallback(mainExecutor, callback)
+        } catch (e: SecurityException) {
+            Log.d("NetLock", "Tile: unable to register telephony callback: ${e.message}")
         }
     }
 
     private fun stopTrackingNetworkType() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            telephonyCallback?.let { telephonyManager?.unregisterTelephonyCallback(it) }
-        }
+        telephonyCallback?.let { telephonyManager?.unregisterTelephonyCallback(it) }
         telephonyCallback = null
         telephonyManager = null
     }
 
     private fun updateTileLabel(shortLabel: String) {
         qsTile?.apply {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                subtitle = shortLabel
-            } else {
-                label = "Network: $shortLabel"
-            }
+            subtitle = shortLabel
             icon = generateTileIcon(shortLabel)
             state = if (shortLabel == "5G") Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
             updateTile()
@@ -124,6 +109,7 @@ class NetworkTypeTileService : TileService() {
         }
     }
 
+    @Suppress("DEPRECATION")
     private fun legacyShortLabel(type: Int): String {
         return when (type) {
             TelephonyManager.NETWORK_TYPE_NR -> "5G"
@@ -148,25 +134,10 @@ class NetworkTypeTileService : TileService() {
         val subId = resolveSim1SubscriptionId()
         val hasSubId = subId != SubscriptionManager.INVALID_SUBSCRIPTION_ID
 
-        // Best-effort: jump straight into the "Preferred network type"
-        // fragment for SIM 1. Relies on internal Settings class names that
-        // vary by MIUI/ROM version — may not resolve on every build, hence
-        // wrapped in resolveActivity() checks with a safe fallback below.
         val deepLinkIntents = if (hasSubId) {
             listOf(
-                // Confirmed via Activity Finder
                 Intent().setComponent(
                     ComponentName("com.android.phone", "com.android.phone.settings.PreferredNetworkTypeListPreference")
-                ).apply {
-                    putExtra(Settings.EXTRA_SUB_ID, subId)
-                },
-                Intent().setComponent(
-                    ComponentName("com.android.settings", "com.android.settings.Settings\$NetworkSelectSettingsActivity")
-                ).apply {
-                    putExtra(Settings.EXTRA_SUB_ID, subId)
-                },
-                Intent().setComponent(
-                    ComponentName("com.android.settings", "com.android.settings.Settings\$MobileNetworkActivity")
                 ).apply {
                     putExtra(Settings.EXTRA_SUB_ID, subId)
                 }
@@ -182,14 +153,10 @@ class NetworkTypeTileService : TileService() {
                     launchAndCollapse(intent)
                     return
                 }
-            } catch (e: Exception) {
-                // try the next candidate
+            } catch (_: Exception) {
             }
         }
 
-        // Reliable fallback: standard public API + EXTRA_SUB_ID — this
-        // skips the SIM-picker page entirely and opens SIM 1's own network
-        // settings page directly (one tap short of "Preferred network type").
         val fallback = Intent(Settings.ACTION_NETWORK_OPERATOR_SETTINGS).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             if (hasSubId) {
@@ -203,7 +170,6 @@ class NetworkTypeTileService : TileService() {
         }
     }
 
-    @Suppress("DEPRECATION")
     private fun launchAndCollapse(intent: Intent) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             val pendingIntent = PendingIntent.getActivity(
@@ -211,13 +177,17 @@ class NetworkTypeTileService : TileService() {
             )
             startActivityAndCollapse(pendingIntent)
         } else {
-            startActivityAndCollapse(intent)
+            try {
+                val legacyMethod = TileService::class.java.getMethod("startActivityAndCollapse", Intent::class.java)
+                legacyMethod.invoke(this, intent)
+            } catch (_: Exception) {
+            }
         }
     }
 
     private fun generateTileIcon(text: String): Icon {
         val size = 96
-        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val bitmap = createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = android.graphics.Color.WHITE

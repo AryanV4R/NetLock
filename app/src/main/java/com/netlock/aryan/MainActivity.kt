@@ -1,36 +1,19 @@
 package com.netlock.aryan
 
 import android.Manifest
-import android.app.NotificationChannel
-import android.app.NotificationManager
+import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
-import android.content.BroadcastReceiver
 import android.content.ComponentName
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
-import android.net.Uri
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.ui.draw.clip
 import android.os.Build
 import android.os.Bundle
-import android.os.VibrationEffect
-import android.os.Vibrator
-import android.os.VibratorManager
 import android.provider.Settings
-import android.telephony.ServiceState
-import android.telephony.SubscriptionManager
-import android.telephony.TelephonyCallback
-import android.telephony.TelephonyDisplayInfo
-import android.telephony.TelephonyManager
-import android.telephony.SignalStrength
-import android.telephony.CellSignalStrengthLte
-import android.telephony.CellSignalStrengthNr
-import android.telephony.CellInfo
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -69,7 +52,6 @@ import androidx.compose.material3.PlainTooltip
 import androidx.compose.material3.TooltipBox
 import androidx.compose.material3.TooltipDefaults
 import androidx.compose.material3.rememberTooltipState
-import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -77,9 +59,10 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -97,14 +80,11 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Calendar
 import java.util.Locale
-import androidx.core.app.NotificationCompat
-import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
-import androidx.core.graphics.drawable.IconCompat
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Paint
-import android.graphics.Typeface
+import androidx.core.content.edit
+import androidx.core.net.toUri
+import androidx.compose.material3.TooltipAnchorPosition
+import kotlin.time.Duration.Companion.seconds
 import android.util.Log
 import com.netlock.aryan.ui.theme.NetLockTheme
 import androidx.compose.material3.LocalContentColor
@@ -128,7 +108,8 @@ import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.ScaffoldDefaults
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -137,8 +118,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.systemBarsPadding
 data class NetworkEvent(val type: String, val timestampMillis: Long)
 
-// Shared style palette — reference app ke dark/neon look se liya gaya
-private val BgBlack = Color(0xFF0F0F0F)   // YouTube-style dark, pure black nahi
+private val BgBlack = Color(0xFF0F0F0F)
 private val CardDark = Color(0xFF121212)
 private val AccentGreen = Color(0xFF00E676)
 private val AccentOrange = Color(0xFFFF9500)
@@ -151,8 +131,6 @@ private val DisplayFont = FontFamily(
     Font(R.font.montserrat_bold, FontWeight.Bold)
 )
 
-// Light mode me neon accents white par dhundhle the — yahan har theme ke readable shades
-// Theme switch par colors jhat se badalne ki jagah smoothly fade hote hain
 private const val THEME_ANIM_MS = 350
 
 @Composable
@@ -175,7 +153,6 @@ private fun themed(dark: Boolean, darkColor: Color, lightColor: Color): Color {
 @Composable private fun screenContentColor(dark: Boolean) = themed(dark, Color.White, Color.Black)
 @Composable private fun navIndicatorColor(dark: Boolean) = themed(dark, Color(0xFF1E3A2B), Color(0xFFDDF5E6))
 
-// Saved string ke andar ka HH:mm (ya HH:mm:ss) part 12-hr AM/PM mein badalta hai
 private fun to12Hour(raw: String): String {
     if (raw.contains("AM", ignoreCase = true) || raw.contains("PM", ignoreCase = true)) return raw
     return Regex("""(\d{1,2}):(\d{2})(:\d{2})?""").replace(raw) { m ->
@@ -188,10 +165,8 @@ private fun to12Hour(raw: String): String {
 
 class MainActivity : ComponentActivity() {
 
-    // Holds the live-updating network type string; Compose reads this reactively
     private val networkType = NetLockState.networkType
 
-    // UI state for Home/Stats/Settings tabs, theme toggle and last-switch timestamp
     private val isDarkTheme = mutableStateOf(true)
     private val lastSwitchTime = NetLockState.lastSwitchTime
     private val vibrateEnabled = NetLockState.vibrateEnabled
@@ -213,7 +188,7 @@ class MainActivity : ComponentActivity() {
     private val monitoringEnabled = NetLockState.monitoringEnabled
     private val bypassDnd = NetLockState.bypassDnd
     private val showOnboarding = mutableStateOf(false)
-    private val onboardingPage = mutableStateOf(0)
+    private val onboardingPage = mutableIntStateOf(0)
 
     private lateinit var prefs: SharedPreferences
     private var trackingStartMillis: Long = 0L
@@ -224,7 +199,6 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (showOnboarding.value) {
-            // Onboarding mein service abhi start nahi hogi — "START MONITORING" par hogi
             if (!granted) networkType.value = "Permission denied"
             advanceOnboarding()
         } else if (granted) {
@@ -247,8 +221,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // Restore saved preferences so settings survive an app restart
-        prefs = getSharedPreferences(Prefs.FILE, Context.MODE_PRIVATE)
+        prefs = getSharedPreferences(Prefs.FILE, MODE_PRIVATE)
         isDarkTheme.value = prefs.getBoolean(KEY_DARK_THEME, true)
         vibrateEnabled.value = prefs.getBoolean(KEY_VIBRATE_ENABLED, true)
         soundEnabled.value = prefs.getBoolean(KEY_SOUND_ENABLED, true)
@@ -259,49 +232,37 @@ class MainActivity : ComponentActivity() {
         monitoringEnabled.value = prefs.getBoolean(KEY_MONITORING_ENABLED, true)
         bypassDnd.value = prefs.getBoolean(KEY_BYPASS_DND, true)
         totalSwitchCount.value = prefs.getLong(KEY_TOTAL_SWITCHES, 0L)
-        // Pehli baar app khulne par "tracking start" timestamp save karo —
-        // agli baar se yahi wahi purana value dega (kabhi overwrite nahi hoga)
         val savedTrackingStart = prefs.getLong(KEY_TRACKING_START, 0L)
         trackingStartMillis = if (savedTrackingStart != 0L) {
             savedTrackingStart
         } else {
-            // Purana event data pehle se maujood ho sakta hai (ye naya code
-            // aane se pehle ka) — agar hai, toh uske sabse purane event ko
-            // hi tracking-start maano, "abhi" nahi. Warna numerator (bucket
-            // durations, jo purane events se bante h) aur denominator
-            // (elapsed window) alag time-range se calculate hone lagte h,
-            // aur total 100% se zyada dikhne lagta h.
             val earliestExisting = eventLog.value.minOfOrNull { it.timestampMillis }
             val start = earliestExisting ?: System.currentTimeMillis()
-            prefs.edit().putLong(KEY_TRACKING_START, start).apply()
+            prefs.edit { putLong(KEY_TRACKING_START, start) }
             start
-        }                       // 240
+        }
 
-        // ---- Onboarding decision ----
-        onboardingPage.value = savedInstanceState?.getInt(STATE_ONBOARDING_PAGE) ?: 0
+        onboardingPage.intValue = savedInstanceState?.getInt(STATE_ONBOARDING_PAGE) ?: 0
         val phoneAlreadyGranted = ContextCompat.checkSelfPermission(
             this, Manifest.permission.READ_PHONE_STATE
         ) == PackageManager.PERMISSION_GRANTED
-        // Purana user (update ke baad) jiske paas permission pehle se hai — onboarding skip
         if (savedInstanceState == null &&
             !prefs.getBoolean(KEY_ONBOARDING_DONE, false) &&
             phoneAlreadyGranted
         ) {
-            prefs.edit().putBoolean(KEY_ONBOARDING_DONE, true).apply()
+            prefs.edit { putBoolean(KEY_ONBOARDING_DONE, true) }
         }
         showOnboarding.value = !prefs.getBoolean(KEY_ONBOARDING_DONE, false)
 
-        // Onboarding chal rahi ho to permissions aur service start us flow ke andar hoga
         if (!showOnboarding.value) {
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&   // 242 (jaisa tha)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
             != PackageManager.PERMISSION_GRANTED
         ) {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
 
-        // Monitoring ab NetLockService me chalti hai, yahan sirf use start karo
         if (monitoringEnabled.value) {
             ContextCompat.startForegroundService(this, Intent(this, NetLockService::class.java))
         } else {
@@ -316,13 +277,13 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            val selectedTab = rememberSaveable { mutableStateOf(0) }
-                        val nowTick = remember { mutableStateOf(System.currentTimeMillis()) }
-            LaunchedEffect(selectedTab.value) {
-                if (selectedTab.value == 1) {
+            val selectedTab = rememberSaveable { mutableIntStateOf(0) }
+                        val nowTick = remember { mutableLongStateOf(System.currentTimeMillis()) }
+            LaunchedEffect(selectedTab.intValue) {
+                if (selectedTab.intValue == 1) {
                     while (true) {
-                        nowTick.value = System.currentTimeMillis()
-                        delay(10_000L)
+                        nowTick.longValue = System.currentTimeMillis()
+                        delay(10.seconds)
                     }
                 }
             }
@@ -347,23 +308,26 @@ class MainActivity : ComponentActivity() {
     LocalTextStyle provides LocalTextStyle.current.copy(fontFamily = DisplayFont)
 ) {
                 if (showOnboarding.value) {
-                    BackHandler(enabled = onboardingPage.value > 0) {
-                        onboardingPage.value -= 1
+                    BackHandler(enabled = onboardingPage.intValue > 0) {
+                        onboardingPage.intValue -= 1
                     }
                     OnboardingScreen(
-                        currentPage = onboardingPage.value,
+                        currentPage = onboardingPage.intValue,
                         isDarkTheme = isDarkTheme.value,
                         onButtonClick = { onOnboardingAction() }
                     )
                 } else {
-                val cfg = LocalConfiguration.current
-                val useRail = cfg.screenWidthDp >= 600 || cfg.screenWidthDp > cfg.screenHeightDp
+                val density = LocalDensity.current
+                val containerSize = LocalWindowInfo.current.containerSize
+                val widthDp = with(density) { containerSize.width.toDp() }
+                val heightDp = with(density) { containerSize.height.toDp() }
+                val useRail = widthDp >= 600.dp || widthDp > heightDp
                 val navItems = listOf(
                     Icons.Outlined.Home to "Home",
                     Icons.Outlined.BarChart to "Stats",
                     Icons.Outlined.SettingsIcon to "Settings"
                 )
-                BackHandler(enabled = selectedTab.value != 0) { selectedTab.value = 0 }
+                BackHandler(enabled = selectedTab.intValue != 0) { selectedTab.intValue = 0 }
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
                     containerColor = screenBg,
@@ -373,8 +337,8 @@ class MainActivity : ComponentActivity() {
                             NavigationBar(containerColor = screenBg) {
                                 navItems.forEachIndexed { index, (icon, label) ->
                                     NavTooltipItem(
-                                        selected = selectedTab.value == index,
-                                        onClick = { selectedTab.value = index },
+                                        selected = selectedTab.intValue == index,
+                                        onClick = { selectedTab.intValue = index },
                                         icon = icon,
                                         label = label,
                                         isDarkTheme = isDarkTheme.value
@@ -392,8 +356,8 @@ class MainActivity : ComponentActivity() {
                             ) {
                                 navItems.forEachIndexed { index, (icon, label) ->
                                     NavTooltipRailItem(
-                                        selected = selectedTab.value == index,
-                                        onClick = { selectedTab.value = index },
+                                        selected = selectedTab.intValue == index,
+                                        onClick = { selectedTab.intValue = index },
                                         icon = icon,
                                         label = label,
                                         isDarkTheme = isDarkTheme.value
@@ -406,7 +370,7 @@ class MainActivity : ComponentActivity() {
                             contentAlignment = Alignment.TopCenter
                         ) {
                         Box(modifier = Modifier.widthIn(max = 640.dp).fillMaxSize()) {
-                    when (selectedTab.value) {
+                    when (selectedTab.intValue) {
                         0 -> HomeScreen(
                             appName = "NetLock",
                             networkType = networkType.value,
@@ -415,10 +379,7 @@ class MainActivity : ComponentActivity() {
                             isAirplaneModeOn = isAirplaneModeOn.value,
                             isDarkTheme = isDarkTheme.value,
                             recentEvents = last24hEvents(),
-                            onToggleTheme = { toggleTheme() },
-                            onSimulate4G = { sendServiceAction(NetLockService.ACTION_SIMULATE, "4G") },
-                            onSimulate5G = { sendServiceAction(NetLockService.ACTION_SIMULATE, "5G") },
-                            onRawVibrate = { sendServiceAction(NetLockService.ACTION_TEST_VIBRATE) },
+                            onToggleTheme = { toggleTheme() }
                         )
                         1 -> StatsScreen(
                             appName = "NetLock",
@@ -427,8 +388,8 @@ class MainActivity : ComponentActivity() {
                             totalCount = totalSwitchCount.value,
                             todayCount = todaySwitchCount(),
                             sevenDayCount = sevenDaySwitchCount(),
-                            distribution = distributionDurations(nowTick.value),
-                            distributionWindowMillis = distributionWindowMillis(nowTick.value),
+                            distribution = distributionDurations(nowTick.longValue),
+                            distributionWindowMillis = distributionWindowMillis(nowTick.longValue),
                             operatorName = carrierOperatorName.value,
                             mccMnc = carrierMccMnc.value,
                             radioType = networkType.value,
@@ -474,42 +435,42 @@ class MainActivity : ComponentActivity() {
     
     private fun toggleTheme() {
         isDarkTheme.value = !isDarkTheme.value
-        prefs.edit().putBoolean(KEY_DARK_THEME, isDarkTheme.value).apply()
+        prefs.edit { putBoolean(KEY_DARK_THEME, isDarkTheme.value) }
     }
 
     private fun setVibrateEnabled(enabled: Boolean) {
         vibrateEnabled.value = enabled
-        prefs.edit().putBoolean(KEY_VIBRATE_ENABLED, enabled).apply()
+        prefs.edit { putBoolean(KEY_VIBRATE_ENABLED, enabled) }
     }
 
     private fun setSoundEnabled(enabled: Boolean) {
         soundEnabled.value = enabled
-        prefs.edit().putBoolean(KEY_SOUND_ENABLED, enabled).apply()
+        prefs.edit { putBoolean(KEY_SOUND_ENABLED, enabled) }
     }
 
     private fun setSelectedSimSlot(slot: String) {
         selectedSimSlot.value = slot
-        prefs.edit().putString(KEY_SIM_SLOT, slot).apply()
+        prefs.edit { putString(KEY_SIM_SLOT, slot) }
         sendServiceAction(NetLockService.ACTION_RESTART_SIM)
     }
 
     private fun setAlertOn3G2G(enabled: Boolean) {
         alertOn3G2G.value = enabled
-        prefs.edit().putBoolean(KEY_ALERT_3G_2G, enabled).apply()
+        prefs.edit { putBoolean(KEY_ALERT_3G_2G, enabled) }
     }
     private fun setStartOnBoot(enabled: Boolean) {
         startOnBoot.value = enabled
-        prefs.edit().putBoolean(KEY_START_ON_BOOT, enabled).apply()
+        prefs.edit { putBoolean(KEY_START_ON_BOOT, enabled) }
     }
 
     private fun setBypassDnd(enabled: Boolean) {
         bypassDnd.value = enabled
-        prefs.edit().putBoolean(KEY_BYPASS_DND, enabled).apply()
+        prefs.edit { putBoolean(KEY_BYPASS_DND, enabled) }
     }
 
     private fun setMonitoringEnabled(enabled: Boolean) {
         monitoringEnabled.value = enabled
-        prefs.edit().putBoolean(KEY_MONITORING_ENABLED, enabled).apply()
+        prefs.edit { putBoolean(KEY_MONITORING_ENABLED, enabled) }
         val serviceIntent = Intent(this, NetLockService::class.java)
         if (enabled) {
             networkType.value = "Detecting..."
@@ -520,7 +481,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Service null hone par bhi action drop nahi hoga — service start hokar action handle karegi.
     private fun sendServiceAction(action: String, type: String? = null) {
         if (!monitoringEnabled.value) return
         val intent = Intent(this, NetLockService::class.java).setAction(action)
@@ -554,15 +514,13 @@ class MainActivity : ComponentActivity() {
         return switchCountLog.value.count { it >= cutoff }
     }
 
-    // Raw network-type label ko 5 distribution buckets mein daalta h;
-    // "No Service" / "Flight Mode" / "Unknown" jaise events skip ho jaate h
     private fun distributionBucket(type: String): String? {
-        return when {
-            type == "5G SA" || type == "5G" -> "5G SA"
-            type == "5G NSA" || type == "5G NSA+" -> "5G NSA"
-            type == "4G" || type == "4G LTE" || type == "4G+" -> "4G"
-            type == "3G" -> "3G"
-            type == "2G" -> "2G"
+        return when (type) {
+            "5G SA", "5G" -> "5G SA"
+            "5G NSA", "5G NSA+" -> "5G NSA"
+            "4G", "4G LTE", "4G+" -> "4G"
+            "3G" -> "3G"
+            "2G" -> "2G"
             else -> null
         }
     }
@@ -573,9 +531,6 @@ class MainActivity : ComponentActivity() {
         val events = eventLog.value
             .filter { it.timestampMillis >= cutoff }
             .sortedBy { it.timestampMillis }
-        // Har event ke timestamp se agle event (ya abhi tak, agar wo sabse
-        // recent event hai) tak ka gap nikalo — yehi wo duration hai jitni
-        // der network us type par active raha.
         for (i in events.indices) {
             val start = events[i].timestampMillis
             val end = if (i + 1 < events.size) events[i + 1].timestampMillis else now
@@ -587,9 +542,6 @@ class MainActivity : ComponentActivity() {
         return durations
     }
 
-    // Window = pehle valid event (last 7 din ke andar) se abhi tak. Numerator (bucket
-    // durations) bhi isi range se banta hai, isliye No Service / Flight Mode / "Not Monitored"
-    // gap ka time window me aata hai par kisi bucket me nahi — % ka sum 100 se kam dikh sakta hai.
     private fun distributionWindowMillis(now: Long = System.currentTimeMillis()): Long {
         val cutoff = now - SEVEN_DAYS_MILLIS
         val firstEvent = eventLog.value
@@ -601,9 +553,10 @@ class MainActivity : ComponentActivity() {
 
 
 
+    @SuppressLint("BatteryLife")
     private fun openBatteryOptimizationSettings() {
         val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-            data = Uri.parse("package:$packageName")
+            data = "package:$packageName".toUri()
         }
         try {
             startActivity(intent)
@@ -613,9 +566,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openAutoStartSettings() {
-        // Most Android OEMs hide their "background autostart" manager behind a
-        // vendor-specific screen (there's no single AOSP API for this).
-        // Try known OEM screens first; fall back to the app's own settings page.
         val candidateIntents = listOf(
             Intent().setComponent(
                 ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")
@@ -656,15 +606,13 @@ class MainActivity : ComponentActivity() {
                     return
                 }
             } catch (e: Exception) {
-                // try the next candidate
+                Log.d("NetLock", "Autostart intent failed, trying next: ${e.message}")
             }
         }
 
-        // Fallback: this device's OEM screen isn't in our list — open the
-        // app's own details page so the user can find autostart manually.
         try {
             val fallback = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                data = Uri.parse("package:$packageName")
+                data = "package:$packageName".toUri()
             }
             startActivity(fallback)
         } catch (e: ActivityNotFoundException) {
@@ -672,15 +620,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // ---------- Onboarding ----------
-    // Rotation par page yaad rahe, isliye instance state mein save karte hain
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        outState.putInt(STATE_ONBOARDING_PAGE, onboardingPage.value)
+        outState.putInt(STATE_ONBOARDING_PAGE, onboardingPage.intValue)
     }
 
     private fun onOnboardingAction() {
-        when (OnboardingSteps.getOrNull(onboardingPage.value)) {
+        when (OnboardingSteps.getOrNull(onboardingPage.intValue)) {
             OnboardingStep.NOTIFICATION -> {
                 val needsAsk = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                     ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
@@ -705,18 +651,17 @@ class MainActivity : ComponentActivity() {
                 advanceOnboarding()
             }
             OnboardingStep.ALL_SET -> finishOnboarding()
-            else -> advanceOnboarding() // WELCOME
+            else -> advanceOnboarding()
         }
     }
 
     private fun advanceOnboarding() {
-        if (onboardingPage.value < OnboardingSteps.lastIndex) onboardingPage.value += 1
+        if (onboardingPage.intValue < OnboardingSteps.lastIndex) onboardingPage.intValue += 1
     }
 
     private fun finishOnboarding() {
-        prefs.edit().putBoolean(KEY_ONBOARDING_DONE, true).apply()
+        prefs.edit { putBoolean(KEY_ONBOARDING_DONE, true) }
         showOnboarding.value = false
-        // Permissions ab tak mil chuki hain, isliye monitoring pehle hi launch par shuru hogi
         if (monitoringEnabled.value) {
             ContextCompat.startForegroundService(this, Intent(this, NetLockService::class.java))
         } else {
@@ -749,20 +694,20 @@ fun HomeScreen(
     lastSwitchTime: String?,
     isAirplaneModeOn: Boolean,
     isDarkTheme: Boolean,
+    modifier: Modifier = Modifier,
     recentEvents: List<NetworkEvent> = emptyList(),
-    onToggleTheme: () -> Unit,
-    onSimulate4G: () -> Unit = {},
-    onSimulate5G: () -> Unit = {},
-    onRawVibrate: () -> Unit = {},
-    modifier: Modifier = Modifier
+    onToggleTheme: () -> Unit
 ) {
+    val density = LocalDensity.current
+    val containerSize = LocalWindowInfo.current.containerSize
+    val screenWidthDp = with(density) { containerSize.width.toDp().value }
+    val screenHeightDp = with(density) { containerSize.height.toDp().value }
     Column(
         modifier = modifier
             .fillMaxSize()
             .background(screenBgColor(isDarkTheme))
             .verticalScroll(rememberScrollState())
     ) {
-        // Top row: app name (left) + dark/light toggle (right)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -781,11 +726,10 @@ fun HomeScreen(
 ThemeToggleIcon(isDarkTheme, onToggleTheme)
         }
 
-        // Center block: green status dot, big network text, last switch line
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = (LocalConfiguration.current.screenHeightDp * 0.07f).coerceIn(16f, 72f).dp),
+                .padding(top = (screenHeightDp * 0.07f).coerceIn(16f, 72f).dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Box(
@@ -811,7 +755,7 @@ ThemeToggleIcon(isDarkTheme, onToggleTheme)
             } else {
                 Text(
                     text = networkType,
-                    fontSize = (LocalConfiguration.current.screenWidthDp * 0.16f).coerceIn(40f, 64f).sp,
+                    fontSize = (screenWidthDp * 0.16f).coerceIn(40f, 64f).sp,
                     maxLines = 1,
                     softWrap = false,
                     fontWeight = FontWeight.Bold,
@@ -933,6 +877,7 @@ fun StatsScreen(
     appName: String,
     isDarkTheme: Boolean,
     onToggleTheme: () -> Unit,
+    modifier: Modifier = Modifier,
     totalCount: Long = 0L,
     todayCount: Int = 0,
     sevenDayCount: Int = 0,
@@ -942,8 +887,7 @@ fun StatsScreen(
     mccMnc: String = "—",
     radioType: String = "—",
     rsrpValue: String = "—",
-    rsrqValue: String = "—",
-    modifier: Modifier = Modifier
+    rsrqValue: String = "—"
 ) {
     Column(
         modifier = modifier
@@ -1182,7 +1126,6 @@ fun SettingsScreen(
             .background(screenBgColor(isDarkTheme))
             .verticalScroll(rememberScrollState())
     ) {
-        // Top row: app name (left) + dark/light toggle (right) — same as Home
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1334,7 +1277,6 @@ private fun ThemeToggleIcon(isDarkTheme: Boolean, onToggleTheme: () -> Unit) {
 
 enum class OnboardingStep { WELCOME, NOTIFICATION, PHONE_STATE, BATTERY, ALL_SET }
 
-// Screens ka order (aur dots) yahin se aata hai. Swap karna ho to lines ulti kar do.
 private val OnboardingSteps = listOf(
     OnboardingStep.WELCOME,
     OnboardingStep.NOTIFICATION,
@@ -1390,7 +1332,6 @@ private fun OnboardingScreen(
             .systemBarsPadding()
             .padding(horizontal = 32.dp)
     ) {
-        // Title + subtitle ka block available jagah ke beech mein (reference jaisa)
         Column(
             modifier = Modifier
                 .weight(1f)
@@ -1418,7 +1359,6 @@ private fun OnboardingScreen(
             )
         }
 
-        // Page dots: active = filled, baaki = hollow ring
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.Center
@@ -1601,7 +1541,7 @@ private fun RowScope.NavTooltipItem(
         onClick = onClick,
         icon = {
             TooltipBox(
-                positionProvider = TooltipDefaults.rememberTooltipPositionProvider(),
+                positionProvider = TooltipDefaults.rememberTooltipPositionProvider(TooltipAnchorPosition.Above),
                 tooltip = { PlainTooltip { Text(label) } },
                 state = rememberTooltipState()
             ) {
@@ -1632,7 +1572,7 @@ private fun NavTooltipRailItem(
         onClick = onClick,
         icon = {
             TooltipBox(
-                positionProvider = TooltipDefaults.rememberTooltipPositionProvider(),
+                positionProvider = TooltipDefaults.rememberTooltipPositionProvider(TooltipAnchorPosition.Above),
                 tooltip = { PlainTooltip { Text(label) } },
                 state = rememberTooltipState()
             ) {
