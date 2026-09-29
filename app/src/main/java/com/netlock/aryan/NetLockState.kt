@@ -19,6 +19,7 @@ object NetLockState {
     val carrierMccMnc = mutableStateOf("\u2014")
     val rsrpValue = mutableStateOf("\u2014")
     val rsrqValue = mutableStateOf("\u2014")
+    val sinrValue = mutableStateOf("\u2014")
     val switchCountLog = mutableStateOf<List<Long>>(emptyList())
     val startOnBoot = mutableStateOf(true)
     val monitoringEnabled = mutableStateOf(true)

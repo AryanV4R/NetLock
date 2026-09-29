@@ -14,6 +14,7 @@ import androidx.compose.ui.draw.clip
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -36,6 +37,8 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -46,6 +49,7 @@ import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Settings as SettingsIcon
 import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material.icons.outlined.LightMode
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.PlainTooltip
@@ -183,6 +187,7 @@ class MainActivity : ComponentActivity() {
     private val carrierMccMnc = NetLockState.carrierMccMnc
     private val rsrpValue = NetLockState.rsrpValue
     private val rsrqValue = NetLockState.rsrqValue
+    private val sinrValue = NetLockState.sinrValue
     private val switchCountLog = NetLockState.switchCountLog
     private val startOnBoot = NetLockState.startOnBoot
     private val monitoringEnabled = NetLockState.monitoringEnabled
@@ -395,6 +400,8 @@ class MainActivity : ComponentActivity() {
                             radioType = networkType.value,
                             rsrpValue = rsrpValue.value,
                             rsrqValue = rsrqValue.value,
+                            sinrValue = sinrValue.value,
+                            onRefreshSignal = { refreshSignal() },
                         )
                         else -> SettingsScreen(
                             appName = "NetLock",
@@ -452,6 +459,15 @@ class MainActivity : ComponentActivity() {
         selectedSimSlot.value = slot
         prefs.edit { putString(KEY_SIM_SLOT, slot) }
         sendServiceAction(NetLockService.ACTION_RESTART_SIM)
+    }
+
+    private fun refreshSignal() {
+        if (!monitoringEnabled.value) {
+            Toast.makeText(this, "Monitoring Off", Toast.LENGTH_SHORT).show()
+            return
+        }
+        sendServiceAction(NetLockService.ACTION_REFRESH_SIGNAL)
+        Toast.makeText(this, "refreshed !", Toast.LENGTH_SHORT).show()
     }
 
     private fun setAlertOn3G2G(enabled: Boolean) {
@@ -887,7 +903,9 @@ fun StatsScreen(
     mccMnc: String = "—",
     radioType: String = "—",
     rsrpValue: String = "—",
-    rsrqValue: String = "—"
+    rsrqValue: String = "—",
+    sinrValue: String = "—",
+    onRefreshSignal: () -> Unit = {}
 ) {
     Column(
         modifier = modifier
@@ -953,7 +971,7 @@ ThemeToggleIcon(isDarkTheme, onToggleTheme)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 24.dp, vertical = 8.dp),
+                .padding(start = 24.dp, end = 17.dp, top = 4.dp, bottom = 4.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -962,6 +980,16 @@ ThemeToggleIcon(isDarkTheme, onToggleTheme)
                 fontSize = 13.sp,
                 letterSpacing = 3.sp,
                 color = LabelGray
+            )
+            Icon(
+                imageVector = Icons.Outlined.Refresh,
+                contentDescription = "Refresh signal",
+                tint = LabelGray,
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .clickable(role = Role.Button) { onRefreshSignal() }
+                    .padding(7.dp)
             )
         }
         HorizontalDivider(color = dividerColor(isDarkTheme))
@@ -976,12 +1004,13 @@ ThemeToggleIcon(isDarkTheme, onToggleTheme)
         )
 
         SignalGroupLabel("SIGNAL QUALITY")
-        SignalMetricRow(
-            listOf(
-                "rsrp / ss-rsrp" to rsrpValue,
-                "rsrq / ss-rsrq" to rsrqValue
-            )
+        SignalQualityRow(
+            isDarkTheme = isDarkTheme,
+            rsrp = rsrpValue,
+            rsrq = rsrqValue,
+            sinr = sinrValue
         )
+        SignalGuide(isDarkTheme)
 
         Spacer(modifier = Modifier.height(24.dp))
     }
@@ -1095,6 +1124,139 @@ private fun SignalMetricRow(items: List<Pair<String, String>>) {
     }
 }
 
+private enum class SignalGrade(val label: String) {
+    EXCELLENT("Excellent"), GOOD("Good"), FAIR("Fair"), POOR("Poor")
+}
+
+private fun gradeSignal(value: String, excellent: Int, good: Int, fair: Int): SignalGrade? {
+    val n = value.substringBefore(" ").toIntOrNull() ?: return null
+    if (n == Int.MAX_VALUE) return null
+    return when {
+        n >= excellent -> SignalGrade.EXCELLENT
+        n >= good -> SignalGrade.GOOD
+        n >= fair -> SignalGrade.FAIR
+        else -> SignalGrade.POOR
+    }
+}
+
+@Composable
+private fun gradeColor(grade: SignalGrade, dark: Boolean): Color = when (grade) {
+    SignalGrade.EXCELLENT -> accentGreen(dark)
+    SignalGrade.GOOD -> accentCyan(dark)
+    SignalGrade.FAIR -> accentOrange(dark)
+    SignalGrade.POOR -> accentRed(dark)
+}
+
+@Composable
+private fun SignalQualityRow(isDarkTheme: Boolean, rsrp: String, rsrq: String, sinr: String) {
+    val items = listOf(
+        Triple("rsrp / ss-rsrp", rsrp, gradeSignal(rsrp, -80, -90, -100)),
+        Triple("rsrq / ss-rsrq", rsrq, gradeSignal(rsrq, -10, -15, -20)),
+        Triple("sinr / ss-sinr", sinr, gradeSignal(sinr, 20, 13, 0))
+    )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp, vertical = 10.dp)
+    ) {
+        items.forEach { (label, value, grade) ->
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = label,
+                    fontSize = 13.sp,
+                    fontStyle = FontStyle.Italic,
+                    color = LabelGray
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(text = value, fontSize = 15.sp)
+                if (grade != null) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = grade.label,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = gradeColor(grade, isDarkTheme)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SignalGuide(isDarkTheme: Boolean) {
+    val rows = listOf(
+        Pair(SignalGrade.EXCELLENT, listOf("≥ -80", "≥ -10", "≥ 20")),
+        Pair(SignalGrade.GOOD, listOf("-80 to -90", "-10 to -15", "13 to 20")),
+        Pair(SignalGrade.FAIR, listOf("-90 to -100", "-15 to -20", "0 to 13")),
+        Pair(SignalGrade.POOR, listOf("< -100", "< -20", "< 0"))
+    )
+    val lineColor = dividerColor(isDarkTheme)
+    val shape = RoundedCornerShape(8.dp)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp, vertical = 8.dp)
+            .clip(shape)
+            .border(1.dp, lineColor, shape)
+    ) {
+        GuideRow(
+            cells = listOf("Quality", "RSRP (dBm)", "RSRQ (dB)", "SINR (dB)"),
+            lineColor = lineColor,
+            modifier = Modifier.background(cardColor(isDarkTheme)),
+            isHeader = true
+        )
+        rows.forEach { (grade, ranges) ->
+            HorizontalDivider(color = lineColor)
+            GuideRow(
+                cells = listOf(grade.label) + ranges,
+                lineColor = lineColor,
+                firstCellColor = gradeColor(grade, isDarkTheme)
+            )
+        }
+    }
+}
+
+@Composable
+private fun GuideRow(
+    cells: List<String>,
+    lineColor: Color,
+    modifier: Modifier = Modifier,
+    firstCellColor: Color? = null,
+    isHeader: Boolean = false
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(IntrinsicSize.Min)
+    ) {
+        cells.forEachIndexed { index, text ->
+            if (index > 0) {
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .fillMaxHeight()
+                        .background(lineColor)
+                )
+            }
+            val highlighted = index == 0 && firstCellColor != null
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 4.dp, vertical = 8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = text,
+                    fontSize = 11.sp,
+                    fontWeight = if (highlighted || isHeader) FontWeight.Medium else FontWeight.Normal,
+                    color = if (highlighted) firstCellColor else LabelGray,
+                    textAlign = TextAlign.Center
+                )
+            }
+        }
+    }
+}
 @Composable
 fun SettingsScreen(
     appName: String,

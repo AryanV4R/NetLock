@@ -65,6 +65,7 @@ class NetLockService : Service() {
     private val carrierMccMnc = NetLockState.carrierMccMnc
     private val rsrpValue = NetLockState.rsrpValue
     private val rsrqValue = NetLockState.rsrqValue
+    private val sinrValue = NetLockState.sinrValue
     private val switchCountLog = NetLockState.switchCountLog
     private val bypassDnd = NetLockState.bypassDnd
     private lateinit var telephonyManager: TelephonyManager
@@ -124,6 +125,7 @@ class NetLockService : Service() {
             ACTION_RESTART_SIM -> restartMonitoringForSimChange()
             ACTION_SIMULATE -> intent.getStringExtra(EXTRA_TYPE)?.let { simulateNetwork(it) }
             ACTION_TEST_VIBRATE -> testVibrate()
+            ACTION_REFRESH_SIGNAL -> refreshSignalNow()
         }
         return START_STICKY
     }
@@ -225,6 +227,7 @@ class NetLockService : Service() {
             carrierMccMnc.value = "—"
             rsrpValue.value = "—"
             rsrqValue.value = "—"
+            sinrValue.value = "—"
             networkType.value = "No Service"
             refreshStatusNotificationIcon()
             return
@@ -310,15 +313,27 @@ class NetLockService : Service() {
             nr != null && nr.ssRsrp != CellInfo.UNAVAILABLE -> {
                 rsrpValue.value = "${nr.ssRsrp} dBm"
                 rsrqValue.value = "${nr.ssRsrq} dB"
+                sinrValue.value = if (nr.ssSinr != CellInfo.UNAVAILABLE) "${nr.ssSinr} dB" else "—"
             }
             lte != null && lte.rsrp != CellInfo.UNAVAILABLE -> {
                 rsrpValue.value = "${lte.rsrp} dBm"
                 rsrqValue.value = "${lte.rsrq} dB"
+                sinrValue.value = if (lte.rssnr != CellInfo.UNAVAILABLE) "${lte.rssnr} dB" else "—"
             }
             else -> {
                 rsrpValue.value = "—"
                 rsrqValue.value = "—"
+                sinrValue.value = "—"
             }
+        }
+    }
+
+    private fun refreshSignalNow() {
+        val manager = monitoredTelephonyManager ?: return
+        updateCarrierInfo(manager)
+        try {
+            manager.signalStrength?.let { updateSignalQuality(it) }
+        } catch (_: SecurityException) {
         }
     }
 
@@ -826,6 +841,7 @@ class NetLockService : Service() {
         const val ACTION_RESTART_SIM = "com.netlock.aryan.action.RESTART_SIM"
         const val ACTION_SIMULATE = "com.netlock.aryan.action.SIMULATE"
         const val ACTION_TEST_VIBRATE = "com.netlock.aryan.action.TEST_VIBRATE"
+        const val ACTION_REFRESH_SIGNAL = "com.netlock.aryan.action.REFRESH_SIGNAL"
         const val EXTRA_TYPE = "type"
 
         private const val CHANNEL_ID_UPGRADE = "network_upgrade"
